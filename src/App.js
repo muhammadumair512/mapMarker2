@@ -414,16 +414,12 @@ function App() {
           overflowY: "auto",
         }}
       >
-        <div style={{ display: 'none' }}>
-
         <StateDropdown
           states={states}
           selectedStateUrl={selectedStateUrl}
           onSelect={(url) => setSelectedStateUrl(url)}
-          
-          />
-          </div>
-        <h3 style={{ marginTop: 0, marginBottom: "10px" ,textAlign: 'center'}}>Data Controls</h3>
+        />
+        <h3 style={{ marginTop: 0, marginBottom: "10px" }}>Data Controls</h3>
         <div style={{ marginBottom: "15px" }}>
           <label style={{ display: "block", fontWeight: "bold" }}>
             Upload Main CSV:
