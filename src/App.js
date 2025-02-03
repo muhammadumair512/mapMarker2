@@ -1,11 +1,17 @@
-// App.jsx
-// increased chunks to 1500 and shapes now only filters visible circles!
-import React, { useState, useRef, useEffect } from "react";
+import React, {
+  useState,
+  useRef,
+  useEffect,
+  useMemo,
+  Suspense,
+  memo,
+} from "react";
 import {
   MapContainer,
   TileLayer,
   Marker,
   Tooltip,
+  CircleMarker,
   useMap,
 } from "react-leaflet";
 import "leaflet/dist/leaflet.css";
@@ -15,24 +21,62 @@ import "leaflet-draw/dist/leaflet.draw.css";
 import "leaflet-draw";
 import booleanPointInPolygon from "@turf/boolean-point-in-polygon";
 import { point, polygon } from "@turf/helpers";
+import simplify from "@turf/simplify";
 import * as XLSX from "xlsx";
+import { quadtree } from "d3-quadtree";
 
-// Custom icons
+// Custom icons for Main CSV markers
 import CustomMarkerIconImage from "./custom-marker.png";
-import DotIconImage from "./small-dot.png";
 
-// Marker icons
 const CustomMarkerIcon = L.icon({
   iconUrl: CustomMarkerIconImage,
   iconSize: [30, 40],
   iconAnchor: [15, 40],
   popupAnchor: [0, -40],
 });
-const DotIcon = L.icon({
-  iconUrl: DotIconImage,
-  iconSize: [10, 10],
-  iconAnchor: [5, 5],
-});
+
+// Global cache for ZIP overlays and resource caching
+const zipOverlayCache = {};
+const zipOverlayResourceCache = {};
+
+// Helper to wrap a promise for Suspense
+function wrapPromise(promise) {
+  let status = "pending";
+  let result;
+  let suspender = promise.then(
+    (r) => {
+      status = "success";
+      result = r;
+    },
+    (e) => {
+      status = "error";
+      result = e;
+    }
+  );
+  return {
+    read() {
+      if (status === "pending") throw suspender;
+      if (status === "error") throw result;
+      return result;
+    },
+  };
+}
+
+// Helper function to create a ZIP overlay from GeoJSON
+const createZipOverlay = (geoData) => {
+  return L.geoJSON(geoData, {
+    style: {
+      color: "#ff7800",
+      weight: 1,
+      fillColor: "#ffeda0",
+      fillOpacity: 0.4,
+    },
+    onEachFeature: (feature, layerInstance) => {
+      const zip = feature.properties.ZCTA5CE10 || "Unknown ZIP";
+      layerInstance.bindPopup(`ZIP Code: ${zip}`);
+    },
+  });
+};
 
 const states = [
   { name: "Pennsylvania", url: "https://raw.githubusercontent.com/OpenDataDE/State-zip-code-GeoJSON/master/pa_pennsylvania_zip_codes_geo.min.json" },
@@ -88,56 +132,249 @@ const states = [
   { name: "Wyoming", url: "https://raw.githubusercontent.com/OpenDataDE/State-zip-code-GeoJSON/refs/heads/master/wy_wyoming_zip_codes_geo.min.json" },
 ];
 
+/* ----------------------------
+   Global CSS
+----------------------------- */
+const globalStyles = `
+/* Desktop Control Panel Style */
+.control-panel {
+  position: absolute;
+  z-index: 1000;
+  top: 10px;
+  right: 10px;
+  width: 250px;
+  max-height: 90vh;
+  overflow-y: auto;
+  padding: 20px;
+  border-radius: 16px;
+  background: rgba(255, 255, 255, 0.15);
+  box-shadow: 0 8px 32px 0 rgba(31, 38, 135, 0.37);
+  backdrop-filter: blur(10px);
+  -webkit-backdrop-filter: blur(10px);
+  border: 1px solid rgba(255, 255, 255, 0.18);
+  font-family: 'Arial', sans-serif;
+  color: #000;
+  text-align: center;
+}
+
+/* Headings */
+.control-panel h3 {
+  font-size: 24px;
+  margin: 0 0 10px 0;
+}
+.control-panel h4 {
+  font-size: 18px;
+  margin: 10px 0;
+}
+
+/* Upload Button & Hidden Input */
+.hidden-input {
+  display: none;
+}
+.upload-row {
+  display: flex;
+  gap: 10px;
+  margin-bottom: 10px;
+  justify-content: center;
+}
+.upload-group {
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+}
+.uploaded-text {
+  font-size: 14px;
+  margin-top: 5px;
+  color: green;
+}
+
+/* Acreage Filter Styles */
+.acreage-container {
+  margin-bottom: 10px;
+  text-align: left;
+}
+.acreage-row {
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  margin-bottom: 5px;
+}
+.acreage-row label {
+  margin-right: 10px;
+  min-width: 90px;
+}
+.acreage-input {
+  width: 80px;
+  padding: 4px;
+  border: 1px solid #ccc;
+  border-radius: 4px;
+}
+.acreage-buttons {
+  margin-top: 10px;
+  display: flex;
+  justify-content: center;
+}
+
+/* Action Buttons */
+.action-buttons {
+  display: flex;
+  gap: 10px;
+  margin-top: 10px;
+  justify-content: center;
+}
+
+/* Button Styles */
+button {
+  padding: 8px 12px;
+  border: none;
+  border-radius: 8px;
+  cursor: pointer;
+  transition: background 0.3s ease;
+  font-size: 16px;
+}
+.btn-primary {
+  background: linear-gradient(145deg, #3b8dff, #0052d4);
+  color: white;
+}
+.btn-primary:hover {
+  background: linear-gradient(145deg, #0052d4, #3b8dff);
+}
+.btn-danger {
+  background: linear-gradient(145deg, #ff416c, #ff4b2b);
+  color: white;
+}
+.btn-danger:hover {
+  background: linear-gradient(145deg, #ff4b2b, #ff416c);
+}
+.btn-clear {
+  background: #283593;
+  color: white;
+}
+.btn-clear:hover {
+  background: #1e256d;
+}
+
+/* Hamburger Button (Mobile Only) */
+.hamburger-button {
+  position: fixed;
+  top: 10px;
+  right: 10px;
+  z-index: 1100;
+  background: #3b8dff;
+  color: white;
+  border: none;
+  border-radius: 4px;
+  padding: 10px;
+  font-size: 20px;
+  cursor: pointer;
+}
+
+/* Close Button inside Mobile Panel */
+.close-button {
+  position: absolute;
+  top: 5px;
+  right: 5px;
+  background: transparent;
+  border: none;
+  font-size: 24px;
+  cursor: pointer;
+}
+
+/* Mobile Layout */
+@media (max-width: 768px) {
+  .control-panel {
+    position: fixed;
+    top: 10px;
+    right: 10px;
+    left: auto;
+    width: 70%;
+    max-height: none;
+    overflow: visible;
+    padding: 10px;
+    display: flex;
+    flex-direction: column;
+    align-items: stretch;
+  }
+  .dropdown-container,
+  .upload-row,
+  .acreage-container,
+  .action-buttons {
+    margin-bottom: 10px;
+  }
+}
+`;
+
+if (typeof document !== "undefined") {
+  const styleTag = document.createElement("style");
+  styleTag.innerText = globalStyles;
+  document.head.appendChild(styleTag);
+}
+
+/* ------------------------------------------------------------------
+   ZIP Overlay Component (using Suspense)
+------------------------------------------------------------------- */
 function ZipOverlay({ zipUrl }) {
   const map = useMap();
-  const layersCache = useRef({});
+
+  const overlayResource = useMemo(() => {
+    if (!zipUrl) return null;
+    if (zipOverlayCache[zipUrl]) {
+      return { read: () => zipOverlayCache[zipUrl] };
+    }
+    if (zipOverlayResourceCache[zipUrl]) return zipOverlayResourceCache[zipUrl];
+
+    const promise = fetch(zipUrl)
+      .then((res) => res.json())
+      .then((geoData) => {
+        const simplifiedGeoData = simplify(geoData, {
+          tolerance: 0.01,
+          highQuality: false,
+        });
+        const overlay = createZipOverlay(simplifiedGeoData);
+        zipOverlayCache[zipUrl] = overlay;
+        return overlay;
+      })
+      .catch((err) => {
+        console.error("Error fetching ZIP code GeoJSON:", err);
+        throw err;
+      });
+    const res = wrapPromise(promise);
+    zipOverlayResourceCache[zipUrl] = res;
+    return res;
+  }, [zipUrl]);
+
+  const overlay = overlayResource ? overlayResource.read() : null;
 
   useEffect(() => {
-    if (!zipUrl) return;
-
-    // Remove existing layers from the map
-    Object.values(layersCache.current).forEach((layer) => map.removeLayer(layer));
-    let currentLayer;
-
-    if (layersCache.current[zipUrl]) {
-      currentLayer = layersCache.current[zipUrl];
-      currentLayer.addTo(map);
-    } else {
-      fetch(zipUrl)
-        .then((res) => res.json())
-        .then((geoData) => {
-          currentLayer = L.geoJSON(geoData, {
-            style: {
-              color: "#ff7800",
-              weight: 1,
-              fillColor: "#ffeda0",
-              fillOpacity: 0.4,
-            },
-            onEachFeature: (feature, layerInstance) => {
-              const zip = feature.properties.ZCTA5CE10 || "Unknown ZIP";
-              layerInstance.bindPopup(`ZIP Code: ${zip}`);
-            },
-          });
-          layersCache.current[zipUrl] = currentLayer;
-          currentLayer.addTo(map);
-        })
-        .catch((err) => console.error("Error fetching ZIP code GeoJSON:", err));
+    if (!overlay) return;
+    Object.values(zipOverlayCache).forEach((layer) => {
+      if (map.hasLayer(layer)) {
+        map.removeLayer(layer);
+      }
+    });
+    overlay.addTo(map);
+    if (overlay.getBounds && overlay.getBounds().isValid()) {
+      map.fitBounds(overlay.getBounds());
     }
-
     return () => {
-      if (currentLayer) map.removeLayer(currentLayer);
+      if (overlay && map.hasLayer(overlay)) {
+        map.removeLayer(overlay);
+      }
     };
-  }, [map, zipUrl]);
+  }, [map, overlay]);
 
   return null;
 }
 
+/* ------------------------------------------------------------------
+   DrawHandler Component (unchanged logic)
+------------------------------------------------------------------- */
 function DrawHandler({
   setShapeFilteredData,
   pricingDataRef,
   locationsRef,
   setDeleteFunction,
-  acreageFilteredDataRef, // we'll receive the acreage-filtered data via ref
+  acreageFilteredDataRef,
 }) {
   const map = useMap();
   const [controlAdded, setControlAdded] = useState(false);
@@ -162,7 +399,6 @@ function DrawHandler({
       selectedShapeRef.current = layer;
     });
 
-    // Use acreageFilteredData if it exists, otherwise use the full pricingData:
     const currentPricingData = acreageFilteredDataRef.current.length
       ? acreageFilteredDataRef.current
       : pricingDataRef.current;
@@ -207,7 +443,10 @@ function DrawHandler({
         draw: {
           marker: false,
           polyline: false,
-          circle: { shapeOptions: { color: "#ff0000" }, showRadius: true },
+          circle: {
+            shapeOptions: { color: "#ff0000", pane: "overlayPane" },
+            showRadius: true,
+          },
           circlemarker: false,
           polygon: { shapeOptions: { color: "#0000ff" }, showArea: true },
           rectangle: { shapeOptions: { color: "#00ff00" } },
@@ -223,7 +462,6 @@ function DrawHandler({
         handleShapeDrawn(layer);
       });
 
-      // Provide a way to delete the selected shape
       setDeleteFunction(() => {
         if (selectedShapeRef.current && drawnItemsRef.current) {
           drawnItemsRef.current.removeLayer(selectedShapeRef.current);
@@ -252,23 +490,155 @@ function DrawHandler({
   return null;
 }
 
+/* ------------------------------------------------------------------
+   Custom hook: useVisiblePricingPoints
+   Filters pricing data based on current map bounds (using a quadtree for speed)
+------------------------------------------------------------------- */
+function useVisiblePricingPoints(pricingData, acreageFilteredData) {
+  const map = useMap();
+  const [visiblePoints, setVisiblePoints] = useState([]);
+  const quadtreeRef = useRef(null);
+
+  useEffect(() => {
+    if (!acreageFilteredData.length && pricingData.length) {
+      quadtreeRef.current = quadtree()
+        .x((d) => d.coords[1])
+        .y((d) => d.coords[0])
+        .addAll(pricingData);
+    }
+  }, [pricingData, acreageFilteredData]);
+
+  useEffect(() => {
+    if (!map) return;
+    const updateVisible = () => {
+      const zoom = map.getZoom();
+      const buffer = zoom < 8 ? 0.5 : zoom < 10 ? 0.2 : zoom < 12 ? 0.1 : zoom < 14 ? 0.05 : 0.02;
+      const bounds = map.getBounds();
+      const north = bounds.getNorth() + buffer;
+      const south = bounds.getSouth() - buffer;
+      const east = bounds.getEast() + buffer;
+      const west = bounds.getWest() - buffer;
+      let points = [];
+
+      if (quadtreeRef.current) {
+        quadtreeRef.current.visit((node, x0, y0, x1, y1) => {
+          if (x0 > east || x1 < west || y0 > north || y1 < south) {
+            return true;
+          }
+          if (!node.length) {
+            let d = node.data;
+            if (d) {
+              const lat = d.coords[0],
+                lng = d.coords[1];
+              if (lat >= south && lat <= north && lng >= west && lng <= east) {
+                points.push(d);
+              }
+            }
+          }
+          return false;
+        });
+      } else {
+        points = pricingData.filter((d) => {
+          const lat = d.coords[0],
+            lng = d.coords[1];
+          return lat >= south && lat <= north && lng >= west && lng <= east;
+        });
+      }
+      setVisiblePoints(points);
+    };
+
+    updateVisible();
+    map.on("moveend zoomend", updateVisible);
+    return () => {
+      map.off("moveend zoomend", updateVisible);
+    };
+  }, [map, pricingData]);
+
+  return visiblePoints;
+}
+
+/* ------------------------------------------------------------------
+   Component to render pricing points using CircleMarkers
+   These markers are drawn via canvas (since preferCanvas is enabled) and
+   show a tooltip with the acreage on hover.
+------------------------------------------------------------------- */
+const VisiblePricingCircleMarkers = memo(function VisiblePricingCircleMarkers({
+  pricingData,
+  acreageFilteredData,
+}) {
+  const visiblePoints =
+    acreageFilteredData.length > 0
+      ? acreageFilteredData
+      : useVisiblePricingPoints(pricingData, acreageFilteredData);
+  return visiblePoints
+    .filter(
+      (point) =>
+        Number.isFinite(point.coords[0]) &&
+        Number.isFinite(point.coords[1])
+    )
+    .map((point, index) => {
+      return (
+        <CircleMarker
+          key={`pricing-${index}`}
+          center={[point.coords[0], point.coords[1]]}
+          radius={3}
+          fillColor="green"
+          // stroke={false}
+          interactive={true}
+           // added
+           color="green"  // Added border color
+           stroke={true}  // Enable border
+           fillOpacity={0.7}  // Added fill opacity (0.7 means 70% opaque)
+           weight={1}  // Border width
+        >
+          {point.lotAcreage !== null && (
+            <Tooltip direction="top" offset={[0, -10]}>
+              <div>
+                <strong>LOT ACREAGE:</strong> {point.lotAcreage}
+              </div>
+            </Tooltip>
+          )}
+        </CircleMarker>
+      );
+    });
+});
+
+/* ------------------------------------------------------------------
+   Main App Component
+------------------------------------------------------------------- */
 function App() {
-  const [selectedStateUrl, setSelectedStateUrl] = useState(states[0].url);
-  const [locations, setLocations] = useState([]); 
-  const [pricingData, setPricingData] = useState([]); 
-  const [shapeFilteredData, setShapeFilteredData] = useState([]); 
+  // Global unhandled promise rejection listener.
+  useEffect(() => {
+    const handler = (event) => {
+      console.error("Unhandled promise rejection:", event.reason);
+      event.preventDefault();
+    };
+    window.addEventListener("unhandledrejection", handler);
+    return () => {
+      window.removeEventListener("unhandledrejection", handler);
+    };
+  }, []);
+
+  const [selectedStateUrl, setSelectedStateUrl] = useState(null);
+  const [locations, setLocations] = useState([]);
+  const [pricingData, setPricingData] = useState([]);
+  const [shapeFilteredData, setShapeFilteredData] = useState([]);
   const [acreageFilteredData, setAcreageFilteredData] = useState([]);
   const [minAcreage, setMinAcreage] = useState("");
   const [maxAcreage, setMaxAcreage] = useState("");
+  const [mainUploaded, setMainUploaded] = useState(false);
+  const [pricingUploaded, setPricingUploaded] = useState(false);
+  const [isMobile, setIsMobile] = useState(window.innerWidth < 768);
+  const [showControlPanel, setShowControlPanel] = useState(!isMobile);
 
-  // Refs for data
   const pricingDataRef = useRef(pricingData);
   const locationsRef = useRef(locations);
-  // We also keep a ref for acreage-filtered data
   const acreageFilteredDataRef = useRef(acreageFilteredData);
-
   const mapRef = useRef(null);
   const deleteLastShapeRef = useRef(() => {});
+
+  const mainInputRef = useRef(null);
+  const pricingInputRef = useRef(null);
 
   useEffect(() => {
     pricingDataRef.current = pricingData;
@@ -280,24 +650,67 @@ function App() {
     acreageFilteredDataRef.current = acreageFilteredData;
   }, [acreageFilteredData]);
 
+  useEffect(() => {
+    const handleResize = () => {
+      const mobile = window.innerWidth < 768;
+      setIsMobile(mobile);
+      if (!mobile) {
+        setShowControlPanel(true);
+      }
+    };
+    window.addEventListener("resize", handleResize);
+    return () => window.removeEventListener("resize", handleResize);
+  }, []);
+
+  // Pre-cache ZIP overlays for states not currently selected.
+  useEffect(() => {
+    states.forEach((st) => {
+      if (st.url !== selectedStateUrl && !zipOverlayCache[st.url]) {
+        fetch(st.url)
+          .then((res) => res.json())
+          .then((geoData) => {
+            const simplifiedGeoData = simplify(geoData, {
+              tolerance: 0.01,
+              highQuality: false,
+            });
+            const overlay = createZipOverlay(simplifiedGeoData);
+            zipOverlayCache[st.url] = overlay;
+          })
+          .catch((err) =>
+            console.error(
+              "Error pre-caching ZIP overlay for state:",
+              st.name,
+              err
+            )
+          );
+      }
+    });
+  }, [selectedStateUrl]);
+
   const handleMainCSVUpload = (event) => {
     const file = event.target.files[0];
     if (!file) return;
     Papa.parse(file, {
       header: true,
       skipEmptyLines: true,
+      worker: true,
       complete: (results) => {
-        const parsedData = results.data
-          .filter((row) => {
-            const lat = parseFloat(row.LATITUDE);
-            const lng = parseFloat(row.LONGITUDE);
-            return Number.isFinite(lat) && Number.isFinite(lng);
-          })
-          .map((row) => ({
-            coords: [parseFloat(row.LATITUDE), parseFloat(row.LONGITUDE)],
-            details: row,
-          }));
-        setLocations(parsedData);
+        try {
+          const parsedData = results.data
+            .filter((row) => {
+              const lat = parseFloat(row.LATITUDE);
+              const lng = parseFloat(row.LONGITUDE);
+              return Number.isFinite(lat) && Number.isFinite(lng);
+            })
+            .map((row) => ({
+              coords: [parseFloat(row.LATITUDE), parseFloat(row.LONGITUDE)],
+              details: row,
+            }));
+          setLocations(parsedData);
+          setMainUploaded(true);
+        } catch (err) {
+          console.error("Error processing Main CSV:", err);
+        }
       },
       error: (err) => console.error("PapaParse Error (Main CSV):", err),
     });
@@ -306,9 +719,11 @@ function App() {
   const handlePricingCSVUpload = (event) => {
     const file = event.target.files[0];
     if (!file) return;
+    let pricingCache = [];
     Papa.parse(file, {
       header: true,
       skipEmptyLines: true,
+      worker: true,
       chunkSize: 1500000,
       chunk: (results) => {
         const chunkData = results.data
@@ -324,12 +739,20 @@ function App() {
           .map((row) => ({
             apn: row["APN - FORMATTED"],
             coords: [parseFloat(row.LATITUDE), parseFloat(row.LONGITUDE)],
-            lotAcreage: row["LOT ACREAGE"] ? parseFloat(row["LOT ACREAGE"]) : null,
+            lotAcreage: row["LOT ACREAGE"]
+              ? parseFloat(row["LOT ACREAGE"])
+              : null,
           }));
-        setPricingData((prev) => [...prev, ...chunkData]);
+        pricingCache.push(...chunkData);
       },
-      complete: () => console.log("Pricing CSV parsing complete!"),
-      error: (err) => console.error("PapaParse Error (Pricing CSV):", err),
+      complete: () => {
+        setPricingData(pricingCache);
+        pricingDataRef.current = pricingCache;
+        setPricingUploaded(true);
+        console.log("Pricing CSV parsing complete!");
+      },
+      error: (err) =>
+        console.error("PapaParse Error (Pricing CSV):", err),
     });
   };
 
@@ -338,7 +761,16 @@ function App() {
     const maxVal = parseFloat(maxAcreage);
     if (isNaN(minVal) || isNaN(maxVal)) {
       alert("Please enter valid numeric values for both min and max acreage.");
-      return;
+/*************  ✨ Codeium Command ⭐  *************/
+  /**
+   * Filters the pricing data to only include parcels with acreage values
+   * between the user-input min and max acreage values.
+   *
+   * If the user has not entered valid numeric values for both min and max
+   * acreage, an alert is shown and the function returns without modifying
+   * the state.
+   */
+/******  57672cdb-8504-4ea1-8660-a20d408df2ad  *******/      return;
     }
     const filtered = pricingData.filter((pd) => {
       if (pd.lotAcreage == null) return false;
@@ -358,192 +790,191 @@ function App() {
     const filteredPricingData = shapeFilteredData.filter(
       (item) => item.type === "pricing"
     );
-
-    if (filteredPricingData.length === 0) {
+    const filteredCompsData = shapeFilteredData.filter(
+      (item) => item.type === "comps"
+    );
+    if (filteredPricingData.length === 0 && filteredCompsData.length === 0) {
       alert("No data points within the drawn shape to download.");
       return;
     }
-
     const pricingDataTab = filteredPricingData.map((item) => ({
       APN: item.apn,
       "LOT ACREAGE": item.lotAcreage,
       Latitude: item.latitude,
       Longitude: item.longitude,
     }));
-
+    const compsDataTab = filteredCompsData.map((item) => ({
+      PRICE: item.price,
+      ACRES: item.acres,
+      Latitude: item.latitude,
+      Longitude: item.longitude,
+    }));
     const workbook = XLSX.utils.book_new();
-    const pricingSheet = XLSX.utils.json_to_sheet(pricingDataTab);
-    XLSX.utils.book_append_sheet(workbook, pricingSheet, "Pricing Data");
+    if (pricingDataTab.length > 0) {
+      const pricingSheet = XLSX.utils.json_to_sheet(pricingDataTab);
+      XLSX.utils.book_append_sheet(workbook, pricingSheet, "Pricing Data");
+    }
+    if (compsDataTab.length > 0) {
+      const compsSheet = XLSX.utils.json_to_sheet(compsDataTab);
+      XLSX.utils.book_append_sheet(workbook, compsSheet, "Comps Data");
+    }
     XLSX.writeFile(workbook, "filtered_data.xlsx");
 
-    // Remove exported APNs from the map data
     const exportedAPNs = new Set(filteredPricingData.map((item) => item.apn));
     setLocations((prev) =>
-      prev.filter((loc) => !exportedAPNs.has(loc.details["APN - FORMATTED"]))
+      prev.filter(
+        (loc) => !exportedAPNs.has(loc.details["APN - FORMATTED"])
+      )
     );
-    setPricingData((prev) => prev.filter((pt) => !exportedAPNs.has(pt.apn)));
+    setPricingData((prev) =>
+      prev.filter((pt) => !exportedAPNs.has(pt.apn))
+    );
 
-    // Clear shape and acreage filters
     setShapeFilteredData([]);
     setAcreageFilteredData([]);
 
     alert("Filtered data downloaded and removed from the map.");
+
+    // Only call applyAcreageFilter if both min and max acreage are valid numbers.
+    if (!isNaN(parseFloat(minAcreage)) && !isNaN(parseFloat(maxAcreage))) {
+      applyAcreageFilter();
+    }
   };
 
-  // Decide which pricing markers to display: acreage-filtered or all
-  const markersToDisplay = acreageFilteredData.length
-    ? acreageFilteredData
-    : pricingData;
-
   return (
-    <div style={{ height: "100vh", width: "100%", position: "relative" }}>
-      {/* Control Panel */}
-      <div
-        style={{
-          position: "absolute",
-          zIndex: 1000,
-          top: 10,
-          right: 10,
-          background: "#f8f9fa",
-          padding: "12px 15px",
-          borderRadius: "8px",
-          boxShadow: "0 3px 8px rgba(0,0,0,0.15)",
-          width: "250px",
-          fontFamily: "Arial, sans-serif",
-          maxHeight: "90vh",
-          overflowY: "auto",
-        }}
-      >
-        <StateDropdown
-          states={states}
-          selectedStateUrl={selectedStateUrl}
-          onSelect={(url) => setSelectedStateUrl(url)}
-        />
-        <h3 style={{ marginTop: 0, marginBottom: "10px" }}>Data Controls</h3>
-        <div style={{ marginBottom: "15px" }}>
-          <label style={{ display: "block", fontWeight: "bold" }}>
-            Upload Main CSV:
-          </label>
-          <input
-            type="file"
-            accept=".csv"
-            onChange={handleMainCSVUpload}
-            style={{ width: "100%", marginTop: "5px" }}
-          />
-        </div>
-        <div style={{ marginBottom: "15px" }}>
-          <label style={{ display: "block", fontWeight: "bold" }}>
-            Upload Pricing CSV:
-          </label>
-          <input
-            type="file"
-            accept=".csv"
-            onChange={handlePricingCSVUpload}
-            style={{ width: "100%", marginTop: "5px" }}
-          />
-        </div>
-        <div
-          style={{
-            marginBottom: "15px",
-            border: "1px solid #ccc",
-            borderRadius: "6px",
-            padding: "8px",
-          }}
+    <div style={{ height: "98vh", width: "100%", position: "relative" }}>
+      {isMobile && !showControlPanel && (
+        <button
+          className="hamburger-button"
+          onClick={() => setShowControlPanel(true)}
         >
-          <label style={{ fontWeight: "bold" }}>Acreage Filter</label>
-          <div style={{ marginTop: "8px" }}>
-            <div style={{ marginBottom: "4px" }}>
-              <label>Min Acreage:</label>
+          ☰
+        </button>
+      )}
+
+      {(!isMobile || showControlPanel) && (
+        <div className="control-panel">
+          {isMobile && (
+            <button
+              className="close-button"
+              onClick={() => setShowControlPanel(false)}
+            >
+              ×
+            </button>
+          )}
+          <h3>Data Controls</h3>
+          <div className="dropdown-container">
+            <StateDropdown
+              states={states}
+              selectedStateUrl={selectedStateUrl}
+              onSelect={(url) => setSelectedStateUrl(url)}
+            />
+          </div>
+          <div className="upload-row">
+            <div className="upload-group">
+              <button
+                className="btn-primary"
+                onClick={() =>
+                  mainInputRef.current && mainInputRef.current.click()
+                }
+              >
+                📤 Main CSV
+              </button>
+              <input
+                type="file"
+                accept=".csv"
+                ref={mainInputRef}
+                onChange={handleMainCSVUpload}
+                className="hidden-input"
+              />
+              {mainUploaded && (
+                <div className="uploaded-text">File Uploaded</div>
+              )}
+            </div>
+            <div className="upload-group">
+              <button
+                className="btn-primary"
+                onClick={() =>
+                  pricingInputRef.current && pricingInputRef.current.click()
+                }
+              >
+                📤 Pricing CSV
+              </button>
+              <input
+                type="file"
+                accept=".csv"
+                ref={pricingInputRef}
+                onChange={handlePricingCSVUpload}
+                className="hidden-input"
+              />
+              {pricingUploaded && (
+                <div className="uploaded-text">File Uploaded</div>
+              )}
+            </div>
+          </div>
+          <div className="acreage-container">
+            <h4 style={{ textAlign: "center" }}>Acreage Filter</h4>
+            <div className="acreage-row">
+              <label>Min :</label>
               <input
                 type="number"
                 value={minAcreage}
                 onChange={(e) => setMinAcreage(e.target.value)}
-                style={{ width: "60px", marginLeft: "15px" }}
+                className="acreage-input"
               />
             </div>
-            <div style={{ marginBottom: "15px" }}>
-              <label>Max Acreage:</label>
+            <div className="acreage-row">
+              <label>Max :</label>
               <input
                 type="number"
                 value={maxAcreage}
                 onChange={(e) => setMaxAcreage(e.target.value)}
-                style={{ width: "60px", marginLeft: "10px" }}
+                className="acreage-input"
               />
             </div>
+            <div className="acreage-buttons">
+              <button onClick={applyAcreageFilter} className="btn-primary">
+                Apply Filter
+              </button>
+              <button
+                onClick={clearFilters}
+                className="btn-clear"
+                style={{ marginLeft: "10px" }}
+              >
+                Clear Filter
+              </button>
+            </div>
           </div>
-          <button
-            onClick={applyAcreageFilter}
-            style={{
-              marginTop: "10px",
-              padding: "6px 12px",
-              background: "#17a2b8",
-              color: "white",
-              border: "none",
-              borderRadius: "4px",
-              cursor: "pointer",
-            }}
-          >
-            Apply Filter
-          </button>
-          <button
-            onClick={clearFilters}
-            style={{
-              marginTop: "10px",
-              marginLeft: "10px",
-              padding: "6px 12px",
-              background: "#6c757d",
-              color: "white",
-              border: "none",
-              borderRadius: "4px",
-              cursor: "pointer",
-            }}
-          >
-            Clear Filter
-          </button>
+          <div className="action-buttons">
+            <button onClick={downloadFilteredDataToExcel} className="btn-primary">
+              📥 Download
+            </button>
+            <button
+              onClick={() => deleteLastShapeRef.current()}
+              className="btn-danger"
+            >
+              🗑️ Delete
+            </button>
+          </div>
         </div>
-        <button
-          onClick={downloadFilteredDataToExcel}
-          style={{
-            marginTop: "5px",
-            padding: "8px 12px",
-            background: "#007bff",
-            color: "white",
-            border: "none",
-            borderRadius: "4px",
-            cursor: "pointer",
-            width: "100%",
-          }}
-        >
-          Download Filtered Data (Excel)
-        </button>
-        <button
-          onClick={() => deleteLastShapeRef.current()}
-          style={{
-            marginTop: "10px",
-            padding: "8px 12px",
-            background: "#dc3545",
-            color: "white",
-            border: "none",
-            borderRadius: "4px",
-            cursor: "pointer",
-            width: "100%",
-          }}
-        >
-          🗑️ Delete Selected Shape
-        </button>
-      </div>
+      )}
 
       <MapContainer
         center={[41.2033, -77.1945]}
         zoom={7}
         style={{ height: "100%", width: "100%" }}
         ref={mapRef}
+        preferCanvas={true}
       >
         <TileLayer
           url="https://{s}.tile.openstreetmap.org/{z}/{x}/{y}.png"
           attribution="&copy; OpenStreetMap contributors"
         />
-        <ZipOverlay zipUrl={selectedStateUrl} />
+        {selectedStateUrl && (
+          <Suspense fallback={null}>
+            <ZipOverlay zipUrl={selectedStateUrl} />
+          </Suspense>
+        )}
         <DrawHandler
           setShapeFilteredData={setShapeFilteredData}
           pricingDataRef={pricingDataRef}
@@ -553,12 +984,11 @@ function App() {
             deleteLastShapeRef.current = fn;
           }}
         />
-
-        {/* Main CSV (comps) markers */}
         {locations
           .filter(
             (loc) =>
-              Number.isFinite(loc.coords[0]) && Number.isFinite(loc.coords[1])
+              Number.isFinite(loc.coords[0]) &&
+              Number.isFinite(loc.coords[1])
           )
           .map((loc, index) => (
             <Marker
@@ -575,32 +1005,18 @@ function App() {
               </Tooltip>
             </Marker>
           ))}
-
-        {/* Pricing markers (either full or acreage-filtered) */}
-        {markersToDisplay
-          .filter((item) => {
-            const [lat, lng] = item.coords || [item.latitude, item.longitude];
-            return Number.isFinite(lat) && Number.isFinite(lng);
-          })
-          .map((point, index) => {
-            const [lat, lng] = point.coords || [point.latitude, point.longitude];
-            return (
-              <Marker key={`pricing-${index}`} position={[lat, lng]} icon={DotIcon}>
-                {point.lotAcreage !== null && (
-                  <Tooltip direction="top" offset={[0, -10]}>
-                    <div>
-                      <strong>LOT ACREAGE:</strong> {point.lotAcreage}
-                    </div>
-                  </Tooltip>
-                )}
-              </Marker>
-            );
-          })}
+        <VisiblePricingCircleMarkers
+          pricingData={pricingData}
+          acreageFilteredData={acreageFilteredData}
+        />
       </MapContainer>
     </div>
   );
 }
 
+/* ------------------------------------------------------------------
+   State Dropdown Component with a search box
+------------------------------------------------------------------- */
 function StateDropdown({ states, selectedStateUrl, onSelect }) {
   const [open, setOpen] = useState(false);
   const [search, setSearch] = useState("");
@@ -617,13 +1033,15 @@ function StateDropdown({ states, selectedStateUrl, onSelect }) {
         onClick={toggleOpen}
         style={{
           padding: "6px",
-          border: "1px solid #ccc",
+          border: "1px solid rgba(0,0,0,0.5)",
           borderRadius: "4px",
           cursor: "pointer",
-          background: "#fff",
+          background: "rgba(255,255,255,0.8)",
         }}
       >
-        {states.find((s) => s.url === selectedStateUrl)?.name || "Select State"}
+        {selectedStateUrl
+          ? states.find((s) => s.url === selectedStateUrl)?.name
+          : "Select State"}
       </div>
       {open && (
         <div
@@ -632,7 +1050,7 @@ function StateDropdown({ states, selectedStateUrl, onSelect }) {
             top: "100%",
             left: 0,
             right: 0,
-            background: "#fff",
+            background: "rgba(255,255,255,0.95)",
             border: "1px solid #ccc",
             borderRadius: "4px",
             maxHeight: "200px",
@@ -645,7 +1063,13 @@ function StateDropdown({ states, selectedStateUrl, onSelect }) {
             placeholder="Search state..."
             value={search}
             onChange={(e) => setSearch(e.target.value)}
-            style={{ width: "100%", padding: "6px", boxSizing: "border-box" }}
+            style={{
+              width: "100%",
+              padding: "6px",
+              boxSizing: "border-box",
+              border: "none",
+              outline: "none",
+            }}
           />
           {filteredStates.map((st) => (
             <div
@@ -659,6 +1083,7 @@ function StateDropdown({ states, selectedStateUrl, onSelect }) {
                 padding: "6px",
                 cursor: "pointer",
                 borderBottom: "1px solid #eee",
+                textAlign: "left",
               }}
             >
               {st.name}
@@ -671,3 +1096,4 @@ function StateDropdown({ states, selectedStateUrl, onSelect }) {
 }
 
 export default App;
+
