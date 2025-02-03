@@ -213,45 +213,65 @@ const globalStyles = `
   margin-top: 10px;
   display: flex;
   justify-content: center;
-}
-
-/* Action Buttons */
+  }
+  
+  /* Action Buttons */
 .action-buttons {
   display: flex;
   gap: 10px;
   margin-top: 10px;
   justify-content: center;
 }
-
-/* Button Styles */
+/* Professional Button Styles */
 button {
-  padding: 8px 12px;
+  padding: 10px 16px;
   border: none;
-  border-radius: 8px;
+  border-radius: 6px;
   cursor: pointer;
-  transition: background 0.3s ease;
-  font-size: 16px;
+  transition: all 0.3s cubic-bezier(0.25, 0.8, 0.25, 1);
+  font-size: 15px;
+  font-weight: 500;
+  box-shadow: 0 2px 5px rgba(0,0,0,0.15);
 }
+
 .btn-primary {
-  background: linear-gradient(145deg, #3b8dff, #0052d4);
+  background: linear-gradient(135deg, #2980b9, #3498db);
   color: white;
 }
+
 .btn-primary:hover {
-  background: linear-gradient(145deg, #0052d4, #3b8dff);
+  background: linear-gradient(135deg, #3498db, #2980b9);
+  box-shadow: 0 4px 8px rgba(0,0,0,0.2);
 }
+
 .btn-danger {
-  background: linear-gradient(145deg, #ff416c, #ff4b2b);
+  background: linear-gradient(135deg, #c0392b, #e74c3c);
   color: white;
 }
+
 .btn-danger:hover {
-  background: linear-gradient(145deg, #ff4b2b, #ff416c);
+  background: linear-gradient(135deg, #e74c3c, #c0392b);
+  box-shadow: 0 4px 8px rgba(0,0,0,0.2);
 }
-.btn-clear {
-  background: #283593;
+
+.btn-green {
+  background: linear-gradient(135deg, #27ae60, #2ecc71);
   color: white;
 }
+
+.btn-green:hover {
+  background: linear-gradient(135deg, #2ecc71, #27ae60);
+  box-shadow: 0 4px 8px rgba(0,0,0,0.2);
+}
+
+.btn-clear {
+  background: #34495e;
+  color: white;
+}
+
 .btn-clear:hover {
-  background: #1e256d;
+  background: #2c3e50;
+  box-shadow: 0 4px 8px rgba(0,0,0,0.2);
 }
 
 /* Hamburger Button (Mobile Only) */
@@ -873,12 +893,12 @@ function App() {
           <div className="upload-row">
             <div className="upload-group">
               <button
-                className="btn-primary"
+                className="btn-danger"
                 onClick={() =>
                   mainInputRef.current && mainInputRef.current.click()
                 }
               >
-                📤 Main CSV
+                📤 Main 
               </button>
               <input
                 type="file"
@@ -893,12 +913,12 @@ function App() {
             </div>
             <div className="upload-group">
               <button
-                className="btn-primary"
+                className="btn-green"
+                // style={{ backgroundColor: "green", borderColor: "green", color:"white" }}
                 onClick={() =>
                   pricingInputRef.current && pricingInputRef.current.click()
                 }
-              >
-                📤 Pricing CSV
+              >📤 Pricing 
               </button>
               <input
                 type="file"
@@ -1096,4 +1116,3 @@ function StateDropdown({ states, selectedStateUrl, onSelect }) {
 }
 
 export default App;
-
